@@ -3,9 +3,11 @@
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -338,3 +340,64 @@ def get_device_imei(serial: Optional[str] = None, dry_run: bool = False) -> Opti
             pass
 
     return None
+
+
+def dump_properties(
+    serial: Optional[str] = None,
+    output_path: Optional[Path] = None,
+    dry_run: bool = False,
+) -> Tuple[bool, str]:
+    """Capture `adb shell getprop` into a text report (identification evidence)."""
+    if dry_run:
+        return True, "[ro.board.platform]: [msm8916]\n"
+
+    cmd = ["adb"]
+    if serial:
+        cmd.extend(["-s", serial])
+    cmd.extend(["shell", "getprop"])
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        text = (res.stdout or "") + (res.stderr or "")
+        if output_path:
+            output_path = Path(output_path).expanduser().resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(text, errors="replace")
+        return res.returncode == 0, text
+    except (subprocess.SubprocessError, OSError) as exc:
+        return False, str(exc)
+
+
+def pull_firmware(
+    output_dir: Path,
+    serial: Optional[str] = None,
+    dry_run: bool = False,
+) -> Tuple[bool, int]:
+    """
+    Copy the stock Android firmware blobs from /firmware/image/ via ADB.
+
+    These files (modem.*, wcnss.*, mba.mbn, ...) are needed by the cellular modem
+    and Wi-Fi on mainline Linux. Returns (success, number_of_files_pulled).
+    """
+    if dry_run:
+        print(f"[DRY-RUN] Simulating 'adb pull /firmware/image/' -> {output_dir}")
+        return True, 0
+
+    output_dir = Path(output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["adb"]
+    if serial:
+        cmd.extend(["-s", serial])
+    cmd.extend(["pull", "/firmware/image/", str(output_dir / "firmware") + "/"])
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if res.returncode != 0:
+            print(f"[-] adb pull /firmware/image/ failed: {(res.stdout or '') + (res.stderr or '')}", file=sys.stderr)
+            return False, 0
+        files = [p for p in (output_dir / "firmware").rglob("*") if p.is_file()]
+        print(f"[+] Pulled {len(files)} firmware files to {output_dir / 'firmware'}")
+        return True, len(files)
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"[-] ADB firmware pull failed: {exc}", file=sys.stderr)
+        return False, 0

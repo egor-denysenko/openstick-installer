@@ -185,6 +185,7 @@ cython_debug/
 # OpenStick Installer specific
 backups/*
 !backups/.gitkeep
+diagnostics/*
 calibration/*.bin
 calibration/*.img
 loaders/*.mbn

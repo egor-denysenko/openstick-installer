@@ -34,15 +34,35 @@ In the menu it is `[5] Generic / unclassified board (backup & restore only)`. Ba
 `backups/generic_<timestamp>_<imei>/full_emmc.bin` and sidecars in `calibration/`. Restore them
 later with `[2] Restore Stock Backup` or `python3 main.py --board generic` → `[2]`.
 
-While the stock firmware still boots, capture identification data before touching anything:
+While the stock firmware still boots, capture identification data before touching anything.
+Stock Android 4.4.4 kernels do **not** expose `/sys/firmware/fdt`, so use the built-in
+read-only inspection commands instead (see next section). The `--backup-only` flow also
+pulls `/firmware/image/` over ADB automatically **before** entering EDL.
+
+---
+
+## Read-Only Board Inspection
+
+These commands never write to the device. Artifacts go to `diagnostics/<board>/`
+(gitignored):
 
 ```bash
-adb devices
-adb shell getprop ro.board.platform      # must be msm8916
-adb shell getprop ro.product.model
-adb shell getprop ro.hardware
-adb pull /sys/firmware/fdt               # the exact device tree for this board
+# Everything at once: ADB properties + modem/Wi-Fi firmware, lk log,
+# boot partition dump via 'fastboot oem dump', and its appended DTBs.
+python3 main.py --inspect --board generic
+
+# Individual steps:
+python3 main.py --dump-partition boot --board generic     # needs fastboot mode
+python3 main.py --extract-dtb diagnostics/generic/boot.img
 ```
+
+`--inspect` will reboot the device into Fastboot if necessary and leaves it there; run
+`fastboot reboot` when done. `--extract-dtb` is fully offline and works on any boot image
+or on a `boot` partition carved from an EDL dump. It handles both a plain appended FDT and
+Qualcomm's `QCDT` multi-DTB table, and prints each DTB's `model` and `compatible` strings —
+enough to identify an undocumented board before building an image.
+
+Research behind these tools: `../docs/jz08-research.md` in the shared `openstick/` folder.
 
 ---
 

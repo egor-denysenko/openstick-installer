@@ -38,6 +38,7 @@ from openstick.ui import (
     format_size,
 )
 from openstick import adb
+from openstick import bootimg
 from openstick import edl
 from openstick import fastboot
 from openstick import network
@@ -690,6 +691,114 @@ def handle_sanitize_image(image_path_str: str) -> bool:
     return False
 
 
+def diagnostics_dir(device_id: str) -> Path:
+    """Per-board folder for read-only inspection artifacts."""
+    return PROJECT_ROOT / "diagnostics" / device_id.lower().strip()
+
+
+def handle_extract_dtb(boot_image_path: str, output_dir: Optional[str] = None) -> bool:
+    """Offline: extract and report DTBs appended to an Android boot.img."""
+    image_path = Path(boot_image_path).expanduser().resolve()
+    if not image_path.is_file():
+        print(f"[-] Boot image not found: {image_path}", file=sys.stderr)
+        return False
+
+    out_dir = Path(output_dir).expanduser().resolve() if output_dir else image_path.parent / "dtb"
+    try:
+        header = bootimg.read_boot_header(image_path)
+    except (OSError, ValueError) as exc:
+        print(f"[-] Cannot parse boot image: {exc}", file=sys.stderr)
+        return False
+
+    print("\n" + "=" * 65)
+    print("                    BOOT IMAGE / DEVICE TREE REPORT")
+    print("=" * 65)
+    print(f"  - Image:          {image_path}")
+    print(f"  - Kernel size:    {header['kernel_size']} bytes")
+    print(f"  - Ramdisk size:   {header['ramdisk_size']} bytes")
+    print(f"  - Page size:      {header['page_size']}")
+    print(f"  - Header version: {header['header_version']}")
+    print(f"  - Cmdline:        {header['cmdline']}")
+
+    results = bootimg.extract_dtbs_from_boot_image(image_path, out_dir)
+    if not results:
+        print("[-] No appended DTB found in the boot image.", file=sys.stderr)
+        return False
+
+    print(f"\n[+] Found {len(results)} device tree blob(s) in: {out_dir}")
+    for item in results:
+        print(f"  - {Path(item['path']).name} ({item['size']} bytes)")
+        print(f"      model:      {item['model']}")
+        print(f"      compatible: {', '.join(item['compatible']) or '(none)'}")
+    print("=" * 65 + "\n")
+    return True
+
+
+def handle_fastboot_dump(partition: str, device_id: str, dry_run: bool = False) -> bool:
+    """Read a partition via the lk2nd `fastboot oem dump` extension (no EDL)."""
+    if not fastboot.get_fastboot_devices() and not dry_run:
+        print("[-] No fastboot device found. Run 'adb reboot bootloader' first.", file=sys.stderr)
+        return False
+    out_path = diagnostics_dir(device_id) / f"{partition}.img"
+    return fastboot.dump_partition(partition, out_path, dry_run=dry_run)
+
+
+def capture_adb_diagnostics(device_id: str, dry_run: bool = False) -> bool:
+    """Non-invasive ADB recon: getprop dump + /firmware/image/ pull."""
+    out_dir = diagnostics_dir(device_id)
+    print(f"\n[*] Capturing ADB diagnostics into {out_dir.relative_to(PROJECT_ROOT) if not dry_run else out_dir} ...")
+    ready = [d for d in adb.get_adb_devices() if d.is_ready]
+    if not ready and not dry_run:
+        print("[-] No ADB device available; skipping firmware/property capture.", file=sys.stderr)
+        return False
+    serial = ready[0].serial if ready else None
+
+    ok_props, _ = adb.dump_properties(serial, out_dir / "properties.txt", dry_run=dry_run)
+    ok_fw, count = adb.pull_firmware(out_dir, serial=serial, dry_run=dry_run)
+    if ok_props:
+        print(f"[+] Saved Android properties to {(out_dir / 'properties.txt').name}")
+    if ok_fw and not dry_run:
+        print(f"[+] Saved {count} firmware files to {(out_dir / 'firmware').name}")
+    return ok_props or ok_fw
+
+
+def handle_inspect(device_id: str, dry_run: bool = False) -> bool:
+    """
+    Gather board-identification evidence without writing to the device:
+    ADB properties + firmware, lk bootloader log, boot partition and its DTB.
+    """
+    out_dir = diagnostics_dir(device_id)
+    print("\n" + "=" * 65)
+    print(f"       READ-ONLY BOARD INSPECTION ({device_id.upper()})")
+    print("=" * 65)
+
+    capture_adb_diagnostics(device_id, dry_run=dry_run)
+
+    if not fastboot.get_fastboot_devices() and not dry_run:
+        print("\n[*] Rebooting device into Fastboot for boot-partition dump...")
+        adb.reboot_to_bootloader(dry_run=dry_run)
+        if fastboot.wait_for_device(timeout=20) is None:
+            print("[-] Device did not appear in Fastboot. Re-run this command once it does.", file=sys.stderr)
+            return False
+
+    ok_log, log_text = fastboot.get_lk_log(output_path=out_dir / "lk.log", dry_run=dry_run)
+    if ok_log and log_text:
+        print("[+] Saved lk bootloader log to lk.log")
+
+    boot_img = out_dir / "boot.img"
+    if not fastboot.dump_partition("boot", boot_img, dry_run=dry_run):
+        print("[-] Could not dump boot partition; extract the DTB from your EDL dump instead.", file=sys.stderr)
+        return False
+
+    if dry_run:
+        return True
+
+    ok = handle_extract_dtb(str(boot_img), str(out_dir / "dtb"))
+    if ok:
+        print("[*] Device left in Fastboot. Run 'fastboot reboot' when finished.")
+    return ok
+
+
 def main():
     supported_ids = list(get_supported_devices().keys())
     supported_quoted = ", ".join(f"'{k}'" for k in supported_ids)
@@ -710,6 +819,9 @@ def main():
         action="store_true",
         help="Dump stock eMMC + calibration for an unclassified board and exit (no flashing)",
     )
+    parser.add_argument("--extract-dtb", type=str, metavar="BOOT_IMG", help="Extract/report DTBs appended to an Android boot.img (offline)")
+    parser.add_argument("--dump-partition", type=str, metavar="NAME", help="Dump a partition via fastboot oem dump (read-only)")
+    parser.add_argument("--inspect", action="store_true", help="Read-only board recon: ADB firmware/props, lk log, boot.img + DTB")
     parser.add_argument("--sanitize-image", type=str, help="Zero out unique partitions from a full_emmc.bin image")
     parser.add_argument("--create-release", action="store_true", help="Dump raw eMMC, sanitize, and package new release zip")
     parser.add_argument("--find", action="store_true", help="Scan network to find connected OpenStick running Linux")
@@ -726,6 +838,19 @@ def main():
 
     print_banner()
     set_last_detected_imei(None)
+
+    # Read-only diagnostic / inspection modes
+    if args.extract_dtb:
+        success = handle_extract_dtb(args.extract_dtb)
+        sys.exit(0 if success else 1)
+    if args.dump_partition:
+        board_id = args.board or "generic"
+        success = handle_fastboot_dump(args.dump_partition, board_id, dry_run=args.dry_run)
+        sys.exit(0 if success else 1)
+    if args.inspect:
+        board_id = args.board or "generic"
+        success = handle_inspect(board_id, dry_run=args.dry_run)
+        sys.exit(0 if success else 1)
 
     # Create release image CLI flag
     if args.create_release:
@@ -777,6 +902,10 @@ def main():
     backup_dir: Optional[Path] = None
     do_backup = prompt_backup_partitions()
     if do_backup:
+        if device.backup_only:
+            # ADB disappears once the device reboots into EDL, so capture any
+            # still-running stock firmware before the dump begins.
+            capture_adb_diagnostics(device.id, dry_run=args.dry_run)
         backup_ok, backup_dir = handle_partition_backup(device, dry_run=args.dry_run)
         if not backup_ok:
             print("[!] Backup completed with warnings or failed. Check the logs above.")

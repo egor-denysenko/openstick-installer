@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.test_bootimg import make_boot_image, make_fdt
+
 from main import (
     main,
     handle_sanitize_image,
@@ -502,6 +504,46 @@ class TestMain(unittest.TestCase):
         self.assertTrue(ok)
         mock_flash.assert_called_once()
         self.assertIn("INSTALLING OPENSTICK LINUX (DEBIAN) CUSTOM LINUX IMAGE", captured.getvalue())
+
+    @patch("sys.argv", ["main.py", "--extract-dtb", "/mock/boot.img"])
+    def test_main_extract_dtb_flag(self):
+        boot_path = Path(self.test_dir) / "boot.img"
+        boot_path.write_bytes(make_boot_image(make_fdt("JZ08 MIFI", ("fy,jz08", "qcom,msm8916"))))
+
+        captured = io.StringIO()
+        with patch("sys.argv", ["main.py", "--extract-dtb", str(boot_path)]), patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+        self.assertEqual(cm.exception.code, 0)
+        output = captured.getvalue()
+        self.assertIn("BOOT IMAGE / DEVICE TREE REPORT", output)
+        self.assertIn("JZ08 MIFI", output)
+        self.assertIn("fy,jz08", output)
+
+    @patch("sys.argv", ["main.py", "--inspect", "--dry-run"])
+    def test_main_inspect_dry_run(self):
+        captured = io.StringIO()
+        with patch("main.PROJECT_ROOT", self.test_dir), patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+        self.assertEqual(cm.exception.code, 0)
+        output = captured.getvalue()
+        self.assertIn("READ-ONLY BOARD INSPECTION (GENERIC)", output)
+        self.assertIn("DRY-RUN", output)
+
+    @patch("sys.argv", ["main.py", "--board", "generic", "--backup-only", "--dry-run"])
+    @patch("builtins.input", side_effect=["y"])
+    def test_backup_only_captures_adb_firmware_before_edl(self, _):
+        captured = io.StringIO()
+        with patch("main.PROJECT_ROOT", self.test_dir), \
+             patch("main.capture_adb_diagnostics") as mock_capture, \
+             patch("openstick.edl.is_edl_connected", return_value=True), \
+             patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit):
+                main()
+        mock_capture.assert_called_once()
+        self.assertEqual(mock_capture.call_args[0][0], "generic")
+
 
 if __name__ == "__main__":
     unittest.main()
