@@ -12,6 +12,9 @@ from openstick.ui import (
     show_board_menu,
     format_size,
     show_action_menu,
+    show_adb_guidance,
+    show_device_prep_steps,
+    show_device_info,
     prompt_backup_partitions,
     prompt_custom_image_path,
     show_other_board_message,
@@ -63,6 +66,19 @@ class TestUI(unittest.TestCase):
         self.assertIsNotNone(dev)
         self.assertEqual(dev.id, "custom")
 
+    @patch("builtins.input", return_value="5")
+    def test_show_board_menu_select_generic_backup(self, _):
+        dev = show_board_menu()
+        self.assertIsNotNone(dev)
+        self.assertEqual(dev.id, "generic")
+        self.assertTrue(dev.backup_only)
+
+    @patch("builtins.input", return_value="unknown")
+    def test_show_board_menu_select_generic_by_name(self, _):
+        dev = show_board_menu()
+        self.assertIsNotNone(dev)
+        self.assertEqual(dev.id, "generic")
+
     def test_show_other_board_message(self):
         captured = io.StringIO()
         with patch("sys.stdout", captured):
@@ -105,6 +121,25 @@ class TestUI(unittest.TestCase):
     def test_show_action_menu_exit(self, _):
         dev = get_device_by_id("uz801")
         self.assertEqual(show_action_menu(dev), "exit")
+
+    @patch("builtins.input", return_value="1")
+    def test_generic_action_menu_exit(self, _):
+        self.assertEqual(show_action_menu(get_device_by_id("generic")), "exit")
+
+    @patch("builtins.input", return_value="2")
+    def test_generic_action_menu_restore(self, _):
+        self.assertEqual(show_action_menu(get_device_by_id("generic")), "stock")
+
+    def test_generic_device_info_and_prep_are_backup_flavoured(self):
+        dev = get_device_by_id("generic")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            show_device_info(dev)
+            show_device_prep_steps(dev)
+        output = captured.getvalue()
+        self.assertIn("BACKUP-ONLY MODE", output)
+        self.assertIn("PREPARE YOUR GENERIC BEFORE BACKUP", output)
+        self.assertIn("does NOT flash", output)
 
     def test_print_disclaimer(self):
         captured = io.StringIO()
@@ -165,9 +200,46 @@ class TestUI(unittest.TestCase):
         with patch("sys.stdout", captured):
             show_post_install_info("linux", detected_ip="192.168.5.1", detected_imei="868837087737157", device_id="hmmifib")
         output = captured.getvalue()
-        self.assertIn("HM-MIFIB Battery & LCD Utilities:", output)
+        self.assertIn("HMMIFIB Board Utilities:", output)
         self.assertIn("battery", output)
         self.assertIn("lcd-show", output)
+        self.assertIn("usb-mode", output)
+
+    def test_show_device_prep_steps_hmmifib_mentions_battery_and_lcd(self):
+        dev = get_device_by_id("hmmifib")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            show_device_prep_steps(dev)
+        output = captured.getvalue()
+        self.assertIn("PREPARE YOUR HMMIFIB", output)
+        self.assertIn("BATTERY", output)
+        self.assertIn("Power button", output)
+
+    def test_show_device_prep_steps_is_silent_when_empty(self):
+        dev = get_device_by_id("uz801")
+        captured = io.StringIO()
+        with patch.object(dev, "prep_steps", []), patch("sys.stdout", captured):
+            show_device_prep_steps(dev)
+        self.assertEqual(captured.getvalue(), "")
+
+    def test_show_adb_guidance_uses_device_specific_edl_steps(self):
+        dev = get_device_by_id("hmmifib")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            show_adb_guidance(dev)
+        output = captured.getvalue()
+        self.assertIn("Hardware Option (device-specific):", output)
+        self.assertIn("remove the battery", output)
+        self.assertIn("lsusb | grep 05c6:9008", output)
+        self.assertNotIn("Hardware Option (Recovery Button or EDL Pins):", output)
+
+    def test_show_adb_guidance_falls_back_to_generic_edl_steps(self):
+        dev = get_device_by_id("uz801")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            show_adb_guidance(dev)
+        output = captured.getvalue()
+        self.assertIn("Hardware Option (Recovery Button or EDL Pins):", output)
 
 
 if __name__ == "__main__":

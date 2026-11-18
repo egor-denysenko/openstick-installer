@@ -28,6 +28,7 @@ from openstick.ui import (
     show_flashing_warning,
     show_board_menu,
     show_device_info,
+    show_device_prep_steps,
     prompt_backup_partitions,
     prompt_custom_image_path,
     show_adb_guidance,
@@ -336,6 +337,9 @@ def handle_linux_install(
     custom_image_path: Optional[str] = None,
 ) -> bool:
     """Download general-purpose Linux image (or prepare custom image), inject calibration, and flash via EDL."""
+    if device.backup_only:
+        print("[-] Firmware installation is disabled in backup-only (generic) mode.", file=sys.stderr)
+        return False
     print("\n" + "=" * 65)
     title_target = "CUSTOM LINUX IMAGE" if device.id == "custom" else f"FOR {device.name.split()[0].upper()}"
     print(f"       INSTALLING OPENSTICK LINUX (DEBIAN) {title_target}")
@@ -561,6 +565,9 @@ def handle_create_release_image(
     dry_run: bool = False,
 ) -> bool:
     """Dump full raw eMMC from device in EDL, sanitize sensitive data, and package release zip."""
+    if device.backup_only:
+        print("[-] Release image creation is disabled in backup-only (generic) mode.", file=sys.stderr)
+        return False
     print("\n" + "=" * 65)
     print(f"       CREATING SANITIZED RELEASE IMAGE FOR {device.name.split()[0].upper()}")
     print("=" * 65)
@@ -698,6 +705,11 @@ def main():
     parser.add_argument("--skip-bootstrap", action="store_true", help="Skip virtual environment bootstrap check")
     parser.add_argument("--board", "--model", type=str, help=f"Specify board directly (e.g. {', '.join(supported_ids)}, custom)")
     parser.add_argument("--custom-image", type=str, help="Path to custom raw eMMC image (.bin, .img) or zip package to flash")
+    parser.add_argument(
+        "--backup-only",
+        action="store_true",
+        help="Dump stock eMMC + calibration for an unclassified board and exit (no flashing)",
+    )
     parser.add_argument("--sanitize-image", type=str, help="Zero out unique partitions from a full_emmc.bin image")
     parser.add_argument("--create-release", action="store_true", help="Dump raw eMMC, sanitize, and package new release zip")
     parser.add_argument("--find", action="store_true", help="Scan network to find connected OpenStick running Linux")
@@ -726,6 +738,8 @@ def main():
             dev = show_board_menu()
             if dev is None:
                 sys.exit(0)
+        show_device_info(dev)
+        show_device_prep_steps(dev)
         success = handle_create_release_image(dev, dry_run=args.dry_run)
         sys.exit(0 if success else 1)
 
@@ -742,7 +756,9 @@ def main():
         return
 
     # Step 1: Board Selection
-    if args.custom_image and not args.board:
+    if args.backup_only:
+        device = get_device_by_id("generic")
+    elif args.custom_image and not args.board:
         device = CUSTOM_DEVICE
     elif args.board:
         device = get_device_by_id(args.board)
@@ -755,6 +771,7 @@ def main():
             sys.exit(0)
 
     show_device_info(device)
+    show_device_prep_steps(device)
 
     # Step 2: Stock Partition Backup
     backup_dir: Optional[Path] = None
@@ -775,6 +792,11 @@ def main():
             if latest_backup:
                 print(f"[+] Found existing backup in: {latest_backup.name}")
                 edl.extract_partitions_from_raw_image(latest_backup / "full_emmc.bin", calibration_dir)
+
+    if args.backup_only:
+        print("\n[+] Backup-only mode complete. No firmware was downloaded or flashed.")
+        print("    Your dump is in backups/ and the calibration sidecars in calibration/.")
+        sys.exit(0)
 
     # Step 3: Action Selection (Install Linux vs. Restore Stock Backup vs. Create Release vs. Exit)
     action = show_action_menu(device)

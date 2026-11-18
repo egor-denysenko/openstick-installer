@@ -10,6 +10,69 @@ Cross-platform, minimal-action installation and flashing tool for the OpenStick 
 - **HMUF02** (`HMUF02` / `HMUF02-V05`) — Qualcomm MSM8916 4G LTE Wi-Fi USB Modem Dongle
 - **HM-MIFIB** (`HM-MIFIB` / `MF800`) — Qualcomm MSM8916 4G LTE Mobile Wi-Fi Router with Battery & 128×128 LCD
 
+Select it in the board menu with `[3]` (or `--board hmmifib`). The matching firmware asset
+`openstick-hmmifib-linux.zip` is published on GitHub Releases and contains a board-specific
+`full_emmc.bin` (boot config uses `msm8916-fy-mf800-fixed.dtb`), so **no manual DTB editing or
+`lk2nd`/`rootfs` partition flashing is required** — the installer uses the same EDL raw-image
+flow as UZ801. The website's "Flashing & OS Guide" describes an alternative manual fastboot
+method; this installer does not use it.
+
+---
+
+## Backup an Unclassified Board (Generic Mode)
+
+For a board that is **not yet identified** (e.g. an undocumented JZxx variant), use the
+backup-only mode. It never downloads or flashes an image — it only dumps the raw eMMC via
+Qualcomm 9008 EDL and slices the unique calibration partitions:
+
+```bash
+python3 main.py --backup-only            # one-shot: dump + exit
+python3 main.py --board generic           # interactive: dump, then Restore Stock Backup or Exit
+```
+
+In the menu it is `[5] Generic / unclassified board (backup & restore only)`. Backups land in
+`backups/generic_<timestamp>_<imei>/full_emmc.bin` and sidecars in `calibration/`. Restore them
+later with `[2] Restore Stock Backup` or `python3 main.py --board generic` → `[2]`.
+
+While the stock firmware still boots, capture identification data before touching anything:
+
+```bash
+adb devices
+adb shell getprop ro.board.platform      # must be msm8916
+adb shell getprop ro.product.model
+adb shell getprop ro.hardware
+adb pull /sys/firmware/fdt               # the exact device tree for this board
+```
+
+---
+
+## HM-MIFIB (MF800) Preparation Checklist
+
+The installer prints these steps after you select the board. They matter because this device
+is a battery-powered router, not a headless USB dongle:
+
+1. **Keep the battery installed and charged** (at least ~3.8V). Never flash on an empty
+   battery — without it the board can boot-loop on USB power alone (the MSM8916 inrush spike
+   exceeds what a 500 mA USB 2.0 port supplies).
+2. Power on by **holding the Power button ~3 seconds**; the 1.44" LCD should light up. A short
+   press toggles the backlight.
+3. Use a short, **data-capable** USB cable directly on the PC (no hub), and check
+   `adb devices`. If ADB is missing, enable USB debugging in the stock Web UI at
+   `http://192.168.100.1`.
+4. **Back up calibration before flashing.** The board carries the same unique IMEI/RF
+   calibration partitions (`modemst1`, `modemst2`, `fsg`, `fsc`, `persist`, `sec`) as the
+   dongles; the installer injects them into the downloaded image automatically.
+
+If software reboot to EDL fails, the installer shows the device-specific hardware procedure:
+power off, **remove the battery**, connect USB, short the two **EDL test pads in the battery
+bay near the SIM slot** with tweezers, reinsert the battery while holding the short for about
+2 seconds, then confirm with `lsusb | grep 05c6:9008`.
+
+After flashing, the summary lists the board utilities shipped in the image: `battery`,
+`lcd-show` (or `lcd_ctl`), `lte`, and `usb-mode`. The image also bundles `lcd_splash`,
+`pwrkey_lcd_daemon`, and `mf800_power_daemon` for the display/button integration, so the
+framebuffer-console setup described in the website's manual guide is not needed here.
+
 ---
 
 ## Features
@@ -162,6 +225,27 @@ This happens when `edl.py` attempts to connect via PyUSB / `libusb`, but Windows
 4. Select `QUSB_BULK` or `Qualcomm HS-USB QDLoader 9008` (`VID: 05C6, PID: 9008`).
 5. Select **WinUSB** (or **libusb-win32**) in the target driver field and click **Replace Driver**.
 6. Reconnect the stick and re-run `run.bat`.
+
+### Linux: temporary EDL (9008) USB permissions
+
+ADB works without extra setup on most systems, but the EDL dump needs write access to
+`05c6:9008`. If `edl` reports "Permission denied" / "Couldn't get device configuration",
+install this **volatile** rule (it lives in `/run` and disappears on the next reboot, by design):
+
+```bash
+sudo mkdir -p /run/udev/rules.d
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9008", MODE="0666", TAG+="uaccess"' | \
+  sudo tee /run/udev/rules.d/99-edl.rules >/dev/null
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Then put the board into EDL (`adb reboot edl`, or the board's button/test pads) and confirm:
+
+```bash
+lsusb | grep 05c6:9008
+```
+
+`TAG+="uaccess"` alone is not enough on some systems — keep `MODE="0666"`.
 
 ---
 

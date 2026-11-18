@@ -97,7 +97,9 @@ class TestMain(unittest.TestCase):
         self.assertIn("HM-MIFIB (4G LTE Mobile Wi-Fi Router)", output)
         self.assertIn("BACKUP VERIFICATION SUMMARY", output)
         self.assertIn("INSTALLING OPENSTICK LINUX (DEBIAN) FOR HM-MIFIB", output)
-        self.assertIn("HM-MIFIB Battery & LCD Utilities:", output)
+        self.assertIn("PREPARE YOUR HMMIFIB BEFORE FLASHING", output)
+        self.assertIn("HMMIFIB Board Utilities:", output)
+        self.assertIn("lcd-show", output)
 
     @patch("sys.argv", ["main.py", "--dry-run"])
     @patch("builtins.input", side_effect=["4", "y", "1", "/mock/custom_image.bin"])
@@ -110,6 +112,22 @@ class TestMain(unittest.TestCase):
         self.assertIn("BACKUP VERIFICATION SUMMARY", output)
         self.assertIn("CUSTOM LINUX IMAGE SPECIFICATION", output)
         self.assertIn("INSTALLING OPENSTICK LINUX (DEBIAN) CUSTOM LINUX IMAGE", output)
+
+    @patch("sys.argv", ["main.py", "--backup-only", "--dry-run"])
+    @patch("builtins.input", side_effect=["y"])
+    def test_main_backup_only_dry_run(self, mock_input):
+        captured = io.StringIO()
+        with patch("main.PROJECT_ROOT", self.test_dir), patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+        self.assertEqual(cm.exception.code, 0)
+        output = captured.getvalue()
+        self.assertIn("Generic / unclassified MSM8916", output)
+        self.assertIn("BACKUP-ONLY MODE", output)
+        self.assertIn("BACKUP VERIFICATION SUMMARY", output)
+        self.assertIn("Backup-only mode complete", output)
+        self.assertNotIn("Choose Next Action", output)
+        self.assertNotIn("INSTALLING OPENSTICK LINUX", output)
 
     @patch("sys.argv", ["main.py", "--custom-image", "/mock/custom_image.bin", "--dry-run"])
     @patch("builtins.input", side_effect=["y", "1"])

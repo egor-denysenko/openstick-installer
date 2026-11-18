@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from openstick import __version__
 from openstick.devices import (
     CUSTOM_DEVICE,
+    GENERIC_DEVICE,
     DeviceModel,
     get_device_by_id,
     get_device_by_index,
@@ -63,17 +64,19 @@ def show_board_menu() -> DeviceModel:
     """
     devices = list(get_supported_devices().values())
     custom_idx = len(devices) + 1
+    generic_idx = custom_idx + 1
 
     print("\n[+] Step 1: Select your target board")
     print("-" * 55)
     for idx, dev in enumerate(devices, start=1):
         print(f"  [{idx}] {dev.name} - Qualcomm MSM8916")
-    print(f"  [{custom_idx}] Custom image")
+    print(f"  [{custom_idx}] Custom image (flash your own raw eMMC image)")
+    print(f"  [{generic_idx}] Generic / unclassified board (backup & restore only)")
     print("-" * 55)
 
     while True:
         try:
-            choice = input(f"Please select board [1-{custom_idx}] or 'q' to quit: ").strip().lower()
+            choice = input(f"Please select board [1-{generic_idx}] or 'q' to quit: ").strip().lower()
             if choice in ("q", "quit", "exit"):
                 print("Exiting.")
                 sys.exit(0)
@@ -82,18 +85,22 @@ def show_board_menu() -> DeviceModel:
                 num = int(choice)
                 if num == custom_idx:
                     return CUSTOM_DEVICE
+                if num == generic_idx:
+                    return GENERIC_DEVICE
                 dev = get_device_by_index(num)
                 if dev is not None:
                     return dev
             elif choice in ("custom", "custom-image", "custom_image", "other"):
                 return CUSTOM_DEVICE
+            elif choice in ("generic", "unknown", "unclassified", "backup", "backup-only"):
+                return GENERIC_DEVICE
             else:
                 dev = get_device_by_id(choice)
                 if dev is not None:
                     return dev
 
             board_hints = ", ".join(f"{i} for {d.id.upper()}" for i, d in enumerate(devices, start=1))
-            print(f"[-] Invalid selection. Enter {board_hints}, or {custom_idx} for Custom image.")
+            print(f"[-] Invalid selection. Enter {board_hints}, {custom_idx} for Custom image, or {generic_idx} for Generic backup.")
         except (KeyboardInterrupt, EOFError):
             print("\nAborted.")
             sys.exit(1)
@@ -132,10 +139,26 @@ def show_device_info(device: DeviceModel):
     print(f"  - RAM / Storage:    {device.ram} / {device.storage}")
     print(f"  - Default Web UI:   {device.adb_enable_url}")
     print(f"  - Firehose Loader:  {device.recommended_loader}")
+    if device.backup_only:
+        print("\n  *** BACKUP-ONLY MODE: no firmware image will be downloaded or flashed. ***")
     print("\nImportant Notes:")
     for note in device.notes:
         print(f"  - {note}")
     print("=" * 60 + "\n")
+
+
+def show_device_prep_steps(device: DeviceModel):
+    """Print the board-specific checklist before the backup/flash workflow starts."""
+    if not device.prep_steps:
+        return
+
+    phase = "BEFORE BACKUP" if device.backup_only else "BEFORE FLASHING"
+    print("\n" + "=" * 65)
+    print(f" PREPARE YOUR {device.id.upper()} {phase}")
+    print("=" * 65)
+    for idx, step in enumerate(device.prep_steps, start=1):
+        print(f"  {idx}. {step}")
+    print("=" * 65 + "\n")
 
 
 def prompt_backup_partitions() -> bool:
@@ -174,12 +197,17 @@ def show_adb_guidance(device: DeviceModel):
     print("    3. The installer will catch it in Fastboot and reboot into EDL mode.")
     print("  - If stick is in Fastboot mode:")
     print("    Run command:         fastboot oem reboot-edl")
-    print("\nHardware Option (Recovery Button or EDL Pins):")
-    print("  1. Unplug the stick from USB.")
-    print("  2. Hold down the physical recovery button on the board,")
-    print("     or short the two EDL test pins/pads with tweezers.")
-    print("  3. While holding the button or shorting pins, plug into USB.")
-    print("  4. Release the button / pins after 3 seconds.")
+    if device.edl_entry_steps:
+        print("\nHardware Option (device-specific):")
+        for idx, step in enumerate(device.edl_entry_steps, start=1):
+            print(f"  {idx}. {step}")
+    else:
+        print("\nHardware Option (Recovery Button or EDL Pins):")
+        print("  1. Unplug the stick from USB.")
+        print("  2. Hold down the physical recovery button on the board,")
+        print("     or short the two EDL test pins/pads with tweezers.")
+        print("  3. While holding the button or shorting pins, plug into USB.")
+        print("  4. Release the button / pins after 3 seconds.")
     print("!" * 65 + "\n")
 
 
@@ -226,6 +254,24 @@ def show_backup_summary(report: dict, calibration_dir: Optional[Path] = None):
 
 def show_action_menu(device: DeviceModel) -> str:
     """Display interactive action menu."""
+    if device.backup_only:
+        print("\n[+] Step 3: Choose Next Action (backup-only mode)")
+        print("-" * 65)
+        print("  [1] Exit - backups and calibration are saved in backups/ and calibration/")
+        print("  [2] Restore Stock Backup - flash a previous backups/generic_*/full_emmc.bin dump via EDL")
+        print("-" * 65)
+        while True:
+            try:
+                choice = input("Please select action [1-2] or 'q' to quit: ").strip().lower()
+                if choice in ("1", "exit", "q", "quit"):
+                    return "exit"
+                if choice in ("2", "stock", "restore"):
+                    return "stock"
+                print("[-] Invalid selection. Enter 1 or 2.")
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted.")
+                sys.exit(1)
+
     print("\n[+] Step 3: Choose Next Action")
     print("-" * 65)
     print("  [1] Install Linux (Debian) [Recommended]")
@@ -366,12 +412,11 @@ def show_post_install_info(
             print("\n  3. Test Hardware LEDs:")
             print("     - Command:  led-test (or 'led-test --help' for options)")
 
-        if device_id and device_id.lower() in ("hmmifib", "hm-mifib", "mifib", "mf800"):
-            print("\n  4. HM-MIFIB Battery & LCD Utilities:")
-            print("     - Battery:  battery (capacity %, voltage & charging status)")
-            print("     - LCD Mode: lcd-show <status|glosos|wave|on|off> (or lcd_ctl)")
-            print("     - Cellular: lte (SIM status, signal strength & IP)")
-            print("     - USB Role: usb-mode <status|gadget|host>")
+        device = get_device_by_id(device_id) if device_id else None
+        if device and device.post_install_tools:
+            print(f"\n  4. {device.id.upper()} Board Utilities:")
+            for command, description in device.post_install_tools:
+                print(f"     - {command}: {description}")
     else:
         print("          STOCK FACTORY FIRMWARE RESTORED")
         print("=" * 65)
